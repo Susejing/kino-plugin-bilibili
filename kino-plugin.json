@@ -1,25 +1,21 @@
 {
   "id": "bilibili",
   "name": "Bilibili",
-  "version": "0.1.0",
-  "apiVersion": 4,
+  "version": "0.2.0",
+  "apiVersion": 6,
   "entry": "plugin.js",
-  "description": "Videos y bangumi de Bilibili (versión China)",
-  "author": "tu-usuario",
-  "homepage": "https://github.com/TU-USUARIO/kino-plugin-bilibili",
+  "description": "Videos de Bilibili (China). Búsqueda y reproducción con firma WBI.",
+  "author": "Susejing",
+  "homepage": "https://github.com/Susejing/kino-plugin-bilibili",
   "hosts": [
     "api.bilibili.com",
     "www.bilibili.com",
     "*.bilibili.com",
     "*.bilivideo.com",
-    "api.bilibili.tv"
+    "interface.bilibili.com"
   ],
   "streamHosts": "any",
-  "capabilities": [
-    "search",
-    "home",
-    "resolve"
-  ],
+  "capabilities": ["search", "home", "resolve"],
   "color": "#FB7299",
   "categories": ["anime", "movies", "series"]
 }
