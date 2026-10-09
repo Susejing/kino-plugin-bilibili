@@ -1,10 +1,10 @@
 {
   "id": "bilibili",
   "name": "Bilibili",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "apiVersion": 6,
   "entry": "plugin.js",
-  "description": "Videos de Bilibili (China). Búsqueda y reproducción con firma WBI.",
+  "description": "Videos de Bilibili. Usa navegador oculto si la API bloquea el stream.",
   "author": "Susejing",
   "homepage": "https://github.com/Susejing/kino-plugin-bilibili",
   "hosts": [
@@ -15,6 +15,7 @@
     "interface.bilibili.com"
   ],
   "streamHosts": "any",
+  "browser": true,
   "capabilities": ["search", "home", "resolve"],
   "color": "#FB7299",
   "categories": ["anime", "movies", "series"]
