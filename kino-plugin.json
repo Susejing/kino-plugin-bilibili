@@ -1,22 +1,28 @@
 {
   "id": "bilibili",
   "name": "Bilibili",
-  "version": "0.3.0",
+  "version": "0.5.0",
   "apiVersion": 6,
   "entry": "plugin.js",
-  "description": "Videos de Bilibili. Usa navegador oculto si la API bloquea el stream.",
+  "description": "Videos de Bilibili. Huella buvid automática + SESSDATA opcional para reproducir fuera de China.",
   "author": "Susejing",
   "homepage": "https://github.com/Susejing/kino-plugin-bilibili",
   "hosts": [
     "api.bilibili.com",
     "www.bilibili.com",
     "*.bilibili.com",
-    "*.bilivideo.com",
-    "interface.bilibili.com"
+    "*.bilivideo.com"
   ],
   "streamHosts": "any",
-  "browser": true,
   "capabilities": ["search", "home", "resolve"],
   "color": "#FB7299",
-  "categories": ["anime", "movies", "series"]
+  "categories": ["anime", "movies", "series"],
+  "settings": [
+    {
+      "key": "sessdata",
+      "label": "Cookie SESSDATA",
+      "type": "password",
+      "hint": "Opcional. bilibili.com logueado → F12 → Application → Cookies → SESSDATA"
+    }
+  ]
 }
