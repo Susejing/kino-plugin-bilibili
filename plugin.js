@@ -1,20 +1,103 @@
-// Kino plugin: Bilibili v0.3.0
-// Búsqueda por API + reproducción con browser.capture (anti-412)
+// Kino plugin: Bilibili v0.5.0
+// buvid3 automático + SESSDATA opcional + Origin/Referer (anti-412)
 
 const API = "https://api.bilibili.com";
 const WEB = "https://www.bilibili.com";
 
-const HEADERS = {
-  "User-Agent":
-    "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Mobile Safari/537.36",
-  Referer: "https://www.bilibili.com/",
-  Origin: "https://www.bilibili.com",
-};
+const UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
 
 function log(...args) {
   try {
     kino.log(...args);
   } catch {}
+}
+
+function sessdata() {
+  let s = String(kino.config.get("sessdata") || "").trim();
+  if (s.toLowerCase().startsWith("sessdata=")) s = s.slice(9).trim();
+  return s;
+}
+
+// ---------- buvid (huella de dispositivo) ----------
+let buvidCache = null;
+
+async function ensureBuvid() {
+  if (buvidCache) return buvidCache;
+
+  // 1) intentar storage del plugin
+  try {
+    const saved = kino.storage.get("buvid");
+    if (saved && saved.b3) {
+      buvidCache = saved;
+      return buvidCache;
+    }
+  } catch {}
+
+  // 2) pedir a Bilibili
+  try {
+    const r = await kino.fetch(API + "/x/frontend/finger/spi", {
+      headers: {
+        "User-Agent": UA,
+        Referer: WEB + "/",
+        Origin: WEB,
+      },
+      timeoutMs: 12000,
+    });
+    if (r.ok) {
+      const data = r.json();
+      if (data && data.code === 0 && data.data) {
+        buvidCache = {
+          b3: data.data.b_3 || data.data.buvid3 || "",
+          b4: data.data.b_4 || data.data.buvid4 || "",
+        };
+        try {
+          kino.storage.set("buvid", buvidCache);
+        } catch {}
+        return buvidCache;
+      }
+    }
+  } catch (e) {
+    log("buvid fail", e && e.message);
+  }
+
+  // 3) fallback aleatorio (mejor que nada)
+  const rand = () =>
+    "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+      const n = (Math.random() * 16) | 0;
+      const v = c === "x" ? n : (n & 0x3) | 0x8;
+      return v.toString(16);
+    });
+  buvidCache = { b3: rand() + "infoc", b4: rand() };
+  try {
+    kino.storage.set("buvid", buvidCache);
+  } catch {}
+  return buvidCache;
+}
+
+function cookieHeader() {
+  const parts = [];
+  const sd = sessdata();
+  if (sd) parts.push("SESSDATA=" + sd);
+  if (buvidCache) {
+    if (buvidCache.b3) parts.push("buvid3=" + buvidCache.b3);
+    if (buvidCache.b4) parts.push("buvid4=" + buvidCache.b4);
+  }
+  return parts.length ? parts.join("; ") : undefined;
+}
+
+function baseHeaders(extra) {
+  const h = {
+    "User-Agent": UA,
+    Referer: WEB + "/",
+    Origin: WEB,
+  };
+  const ck = cookieHeader();
+  if (ck) h.Cookie = ck;
+  if (extra) {
+    for (const k in extra) h[k] = extra[k];
+  }
+  return h;
 }
 
 function cleanTitle(t) {
@@ -42,20 +125,13 @@ function toVideoItem(v) {
   };
 }
 
-let warmed = false;
-async function warmCookies() {
-  if (warmed) return;
-  try {
-    await kino.fetch(WEB + "/", { headers: HEADERS, cookies: true, timeoutMs: 12000 });
-    warmed = true;
-  } catch (e) {
-    log("warm", e && e.message);
-  }
-}
-
-async function getJson(url) {
-  await warmCookies();
-  const r = await kino.fetch(url, { headers: HEADERS, cookies: true, timeoutMs: 20000 });
+async function getJson(url, extraHeaders) {
+  await ensureBuvid();
+  const r = await kino.fetch(url, {
+    headers: baseHeaders(extraHeaders),
+    cookies: true,
+    timeoutMs: 20000,
+  });
   if (!r.ok) {
     throw kino.error("unavailable", "HTTP " + r.status, {
       userMessage: "Bilibili no respondió (HTTP " + r.status + ")",
@@ -63,7 +139,7 @@ async function getJson(url) {
   }
   const text = r.text();
   if (text.trim().startsWith("<")) {
-    throw kino.error("unavailable", "blocked", {
+    throw kino.error("unavailable", "blocked html", {
       userMessage: "Bilibili bloqueó la petición",
     });
   }
@@ -76,8 +152,22 @@ async function getJson(url) {
     });
   }
   if (data.code !== 0 && data.code !== undefined) {
-    throw kino.error("unavailable", data.message || String(data.code), {
-      userMessage: "Bilibili: " + (data.message || data.code),
+    const msg = data.message || String(data.code);
+    if (data.code === -101) {
+      throw kino.error("auth_required", msg, {
+        userMessage:
+          "Sesión inválida. Revisa SESSDATA en Ajustes ▸ Bilibili ▸ Configurar",
+      });
+    }
+    if (data.code === -412 || data.code === 412) {
+      throw kino.error("unavailable", msg, {
+        userMessage: sessdata()
+          ? "Bilibili bloqueó el stream (-412). Prueba renovar SESSDATA o VPN."
+          : "Bilibili bloqueó el stream. Pon SESSDATA en Configurar o usa VPN.",
+      });
+    }
+    throw kino.error("unavailable", msg, {
+      userMessage: "Bilibili: " + msg,
     });
   }
   return data;
@@ -125,119 +215,105 @@ export async function home() {
   ];
 }
 
-// ---------- RESOLVE (browser capture) ----------
-function pickStream(captures) {
-  if (!captures || !captures.length) return null;
-
-  // Preferir m3u8 / dash / mp4
-  const scored = captures.map((c) => {
-    const u = (c.url || "").toLowerCase();
-    let score = 0;
-    if (u.includes(".m3u8")) score += 30;
-    if (u.includes("m4s") || u.includes("dash")) score += 20;
-    if (u.includes(".mp4")) score += 25;
-    if (u.includes("bilivideo")) score += 10;
-    if (c.mime && c.mime.includes("mpegurl")) score += 15;
-    if (c.mime && c.mime.includes("mp4")) score += 10;
-    return { c, score };
+// ---------- RESOLVE ----------
+function streamFromPlay(d, realBvid) {
+  const headers = baseHeaders({
+    Referer: WEB + "/video/" + realBvid,
   });
-  scored.sort((a, b) => b.score - a.score);
-  const best = scored[0] && scored[0].c;
-  if (!best || !best.url) return null;
 
-  const headers = Object.assign(
-    {
-      Referer: "https://www.bilibili.com/",
-      "User-Agent": HEADERS["User-Agent"],
-    },
-    best.headers || {}
-  );
-
-  const out = { url: best.url, headers };
-  if (best.mime) out.mime = best.mime;
-  return out;
+  if (d.durl && d.durl[0] && d.durl[0].url) {
+    return {
+      url: d.durl[0].url,
+      headers,
+      mime: "video/mp4",
+    };
+  }
+  if (d.dash && d.dash.video && d.dash.video.length) {
+    const v =
+      d.dash.video.find((x) => x.codecid === 7) || d.dash.video[0];
+    const u = v.baseUrl || v.base_url;
+    if (u) return { url: u, headers };
+  }
+  return null;
 }
 
 export async function resolve(ref) {
+  await ensureBuvid();
+
   const s = String(ref);
-  let bvid = s;
-  if (s.startsWith("av")) {
-    // resolver av → bvid por si acaso
+  let bvid = null;
+  let aid = null;
+  if (s.startsWith("BV")) bvid = s;
+  else if (s.startsWith("av")) aid = s.slice(2);
+  else bvid = s;
+
+  let viewUrl = API + "/x/web-interface/view?";
+  if (bvid) viewUrl += "bvid=" + encodeURIComponent(bvid);
+  else viewUrl += "aid=" + encodeURIComponent(aid);
+
+  const view = await getJson(viewUrl);
+  const vd = view.data;
+  if (!vd) {
+    throw kino.error("not_found", "no data", {
+      userMessage: "Video no encontrado",
+    });
+  }
+
+  const cid = vd.cid;
+  const realBvid = vd.bvid;
+  const realAid = vd.aid;
+
+  // Varios intentos de playurl (del más permisivo al más completo)
+  const attempts = [
+    // html5 MP4 (suele ser el más fácil fuera de China)
+    API +
+      "/x/player/playurl?bvid=" +
+      encodeURIComponent(realBvid) +
+      "&cid=" +
+      cid +
+      "&qn=64&fnval=1&platform=html5&high_quality=1",
+    API +
+      "/x/player/playurl?bvid=" +
+      encodeURIComponent(realBvid) +
+      "&cid=" +
+      cid +
+      "&qn=32&fnval=1&platform=html5",
+    API +
+      "/x/player/playurl?avid=" +
+      realAid +
+      "&cid=" +
+      cid +
+      "&qn=32&fnval=0&otype=json",
+    // DASH
+    API +
+      "/x/player/playurl?bvid=" +
+      encodeURIComponent(realBvid) +
+      "&cid=" +
+      cid +
+      "&qn=64&fnval=16&fourk=1",
+  ];
+
+  let lastErr = null;
+  for (const playUrl of attempts) {
     try {
-      const view = await getJson(API + "/x/web-interface/view?aid=" + encodeURIComponent(s.slice(2)));
-      if (view.data && view.data.bvid) bvid = view.data.bvid;
+      const play = await getJson(playUrl);
+      const stream = streamFromPlay(play.data, realBvid);
+      if (stream) return stream;
     } catch (e) {
-      log("av resolve", e && e.message);
+      lastErr = e;
+      log("play attempt fail", e && e.message);
     }
-  } else if (!s.startsWith("BV")) {
-    bvid = s;
   }
 
-  const pageUrl = WEB + "/video/" + encodeURIComponent(bvid);
-
-  // 1) Intento rápido por API html5 (a veces funciona)
-  try {
-    const view = await getJson(
-      API + "/x/web-interface/view?bvid=" + encodeURIComponent(bvid)
-    );
-    const cid = view.data && view.data.cid;
-    if (cid) {
-      const play = await getJson(
-        API +
-          "/x/player/playurl?bvid=" +
-          encodeURIComponent(bvid) +
-          "&cid=" +
-          cid +
-          "&qn=32&fnval=1&platform=html5"
-      );
-      const d = play.data;
-      if (d && d.durl && d.durl[0] && d.durl[0].url) {
-        return {
-          url: d.durl[0].url,
-          headers: {
-            Referer: pageUrl,
-            "User-Agent": HEADERS["User-Agent"],
-          },
-          mime: "video/mp4",
-        };
-      }
-    }
-  } catch (e) {
-    log("api play failed, using browser", e && e.message);
-  }
-
-  // 2) Navegador oculto: abre la página y captura el stream real
-  if (typeof kino.browser === "undefined" || typeof kino.browser.capture !== "function") {
-    throw kino.error("unavailable", "no browser", {
+  if (!sessdata()) {
+    throw kino.error("auth_required", "need sessdata", {
       userMessage:
-        "Este plugin necesita el navegador oculto. Actualiza Kino e instala de nuevo aceptando el permiso.",
+        "Para reproducir, pon SESSDATA en Ajustes ▸ Bilibili ▸ Configurar (o prueba VPN)",
     });
   }
-
-  let captures;
-  try {
-    captures = await kino.browser.capture(pageUrl, {
-      // deja que la página cargue y pulse play
-      timeoutMs: 45000,
-    });
-  } catch (e) {
-    log("capture error", e && e.code, e && e.message);
-    const code = e && e.code;
-    if (code === "blocked") {
-      throw kino.error("unavailable", "captcha", {
-        userMessage: "Bilibili pidió verificación humana. No se puede abrir este video.",
-      });
-    }
-    throw kino.error("unavailable", "capture fail", {
-      userMessage: "No se pudo abrir el video en el navegador oculto.",
-    });
-  }
-
-  const stream = pickStream(captures);
-  if (stream) return stream;
-
-  throw kino.error("unavailable", "no stream found", {
+  if (lastErr) throw lastErr;
+  throw kino.error("unavailable", "no stream", {
     userMessage:
-      "No se encontró stream. Bilibili puede estar bloqueando tu región. Prueba otro video o con VPN.",
+      "No se pudo obtener el video. Renueva SESSDATA o prueba VPN (HK/JP).",
   });
 }
