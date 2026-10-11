@@ -1,10 +1,10 @@
 {
   "id": "bilibili",
   "name": "Bilibili",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "apiVersion": 6,
   "entry": "plugin.js",
-  "description": "Busca y explora videos de Bilibili. La reproducción puede requerir VPN o cookie SESSDATA fuera de Asia.",
+  "description": "Busca y explora videos de Bilibili. La reproducción puede requerir VPN fuera de Asia.",
   "author": "Susejing",
   "homepage": "https://github.com/Susejing/kino-plugin-bilibili",
   "hosts": [
@@ -22,7 +22,7 @@
       "key": "sessdata",
       "label": "Cookie SESSDATA",
       "type": "password",
-      "hint": "Opcional. Si usas VPN o estás en Asia, a veces ayuda. F12 → Application → Cookies → SESSDATA"
+      "hint": "Opcional. F12, Application, Cookies, SESSDATA"
     }
   ]
 }
