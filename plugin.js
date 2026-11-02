@@ -1,4 +1,4 @@
-// Kino plugin: Bilibili v0.7.3
+// Kino plugin: Bilibili v0.7.4
 // Dos modos: internacional (bilibili.tv, sin VPN, por defecto) y China (bilibili.com, puede requerir VPN).
 // Modo internacional: búsqueda, series con episodios, subtítulos y streams del gateway público
 // de la app internacional (api.bilibili.tv), que entrega el video en formato DASH (video y audio
@@ -6,6 +6,9 @@
 // v0.7.3: catálogo por secciones con memoria (6 h): la página de anime + la página de Tendencias,
 // leídas con el navegador oculto de Kino; fila de series destacadas por API; "Catálogo completo"
 // que junta todo; y las secciones muestran TODO su contenido con géneros y sinopsis.
+// v0.7.4: a prueba de fallos — el navegador reintenta una vez si falla rápido; si la página de
+// anime no responde, el inicio muestra Tendencias en su lugar y la reintenta tras 5 minutos;
+// y el Registro dice la versión exacta y el motivo de cada fallo del navegador.
 
 const API = "https://api.bilibili.com";
 const WEB = "https://www.bilibili.com";
@@ -80,6 +83,28 @@ function writeCache(key, items) {
       overview: it.overview ? String(it.overview).slice(0, 300) : undefined,
     }));
     kino.storage.set(key, JSON.stringify({ ts: Date.now(), items: slim }));
+  } catch {}
+}
+
+// Un fallo reciente pausa la lectura del navegador de esa página unos minutos.
+function failKeyOf(url) {
+  return url.indexOf("/popular") >= 0 ? "cache:popularFail" : "cache:animeFail";
+}
+
+function failRecent(key) {
+  try {
+    const raw = kino.storage.get(key);
+    if (!raw) return false;
+    const obj = JSON.parse(raw);
+    return !!(obj && obj.ts && Date.now() - obj.ts < 5 * 60 * 1000);
+  } catch {
+    return false;
+  }
+}
+
+function setFailMarker(key) {
+  try {
+    kino.storage.set(key, JSON.stringify({ ts: Date.now() }));
   } catch {}
 }
 
@@ -617,29 +642,39 @@ function itemsFromRenderedHtml(html) {
 }
 
 async function fetchPageViaBrowser(url, timeoutMs) {
+  const ms = timeoutMs || 12000;
+  const label = url.replace(INTL_WEB, "");
+  const t0 = Date.now();
+  let page = null;
   try {
-    const page = await kino.browser.page(url, {
-      waitFor: "/play/",
-      timeoutMs: timeoutMs || 12000,
-    });
-    if (!page || !page.html) {
-      log("browser page sin html");
-      return [];
-    }
-    const items = itemsFromRenderedHtml(page.html);
-    log("browser " + url.replace(INTL_WEB, "") + ": " + page.html.length + " chars, " + items.length + " series");
-    return items;
+    page = await kino.browser.page(url, { waitFor: "/play/", timeoutMs: ms });
   } catch (e) {
-    log("browser falló: " + String(e && e.message ? e.message : e).slice(0, 100));
+    log("browser " + label + " falló: " + String(e && e.message ? e.message : e).slice(0, 100));
+    page = null;
+  }
+  // si falló RÁPIDO (navegador ocupado o limitado), reintentar una vez
+  if ((!page || !page.html) && Date.now() - t0 < 6000) {
+    try {
+      page = await kino.browser.page(url, { waitFor: "/play/", timeoutMs: ms });
+    } catch (e) {
+      log("browser " + label + " reintento falló: " + String(e && e.message ? e.message : e).slice(0, 100));
+      page = null;
+    }
+  }
+  if (!page || !page.html) {
+    log("browser " + label + " sin html");
     return [];
   }
+  const items = itemsFromRenderedHtml(page.html);
+  log("browser " + label + ": " + page.html.length + " chars, " + items.length + " series");
+  return items;
 }
 
 async function fetchAnimePageItems() {
   try {
     const r = await kino.fetch(INTL_WEB + "/en/anime", {
       headers: intlHeaders({ Referer: INTL_WEB + "/en/", "User-Agent": UA }),
-      timeoutMs: 25000,
+      timeoutMs: 12000,
     });
     if (!r.ok) {
       log("anime page HTTP " + r.status);
@@ -663,12 +698,20 @@ async function catalogSection(url, cacheKey, allowBrowser) {
     return { items: cached, loaded: false };
   }
   if (!allowBrowser) return { items: [], loaded: false };
+  if (failRecent(failKeyOf(url))) {
+    log("browser " + url.replace(INTL_WEB, "") + " en pausa (falló hace poco)");
+    return { items: [], loaded: false };
+  }
 
   let items = await fetchPageViaBrowser(url, url.indexOf("/popular") >= 0 ? 9000 : 12000);
   if (!items.length && url.indexOf("/anime") >= 0) {
     items = await fetchAnimePageItems();
   }
-  if (items.length >= 4) writeCache(cacheKey, items);
+  if (items.length >= 4) {
+    writeCache(cacheKey, items);
+    return { items, loaded: true };
+  }
+  setFailMarker(failKeyOf(url));
   return { items, loaded: true };
 }
 
@@ -776,6 +819,7 @@ function mergeItems() {
 
 async function intlHome() {
   const rows = [];
+  const t0 = Date.now();
 
   const anime = await catalogSection(INTL_WEB + "/en/anime", "cache:anime", true);
   if (anime.items.length >= 4) {
@@ -788,8 +832,10 @@ async function intlHome() {
     });
   }
 
-  // Tendencias: solo si esta llamada aún no gastó su lectura de navegador
-  const popular = await catalogSection(INTL_WEB + "/en/popular", "cache:popular", !anime.loaded);
+  // Tendencias: si el anime vino de memoria, o falló rápido y queda tiempo
+  let popularAllow = !anime.loaded;
+  if (anime.loaded && !anime.items.length && Date.now() - t0 < 16000) popularAllow = true;
+  const popular = await catalogSection(INTL_WEB + "/en/popular", "cache:popular", popularAllow);
   if (popular.items.length >= 4) {
     rows.push({
       id: "bts-popular",
@@ -809,7 +855,7 @@ async function intlHome() {
     });
   }
 
-  log("home: " + rows.map((r) => r.title + " " + r.items.length).join(" | "));
+  log("home v0.7.4: " + (rows.length ? rows.map((r) => r.title + " " + r.items.length).join(" | ") : "sin filas"));
 
   if (rows.length) return rows;
 
@@ -956,6 +1002,12 @@ export async function browse(ref, cursor) {
   if (r === "browse:popular") {
     const popular = await catalogSection(INTL_WEB + "/en/popular", "cache:popular", true);
     log("browse popular: " + popular.items.length);
+    if (!popular.items.length) {
+      throw kino.error("unavailable", "tendencias vacías", {
+        userMessage:
+          "Tendencias no pudo cargar ahora mismo. Vuelve al inicio e inténtalo de nuevo en unos minutos.",
+      });
+    }
     return { items: (await enrichItems(popular.items, 40)).slice(0, 100), next: null };
   }
   if (r === "browse:catalog") {
