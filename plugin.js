@@ -1,11 +1,20 @@
-// Kino plugin: Bilibili v0.6.0
-// Búsqueda y catálogo estables. Reproducción si la red lo permite.
+// Kino plugin: Bilibili v0.7.0
+// Dos modos: internacional (bilibili.tv, sin VPN, por defecto) y China (bilibili.com, puede requerir VPN).
+// Modo internacional: búsqueda, series con episodios, subtítulos y streams del gateway público
+// de la app internacional (api.bilibili.tv), que entrega el video en formato DASH (video y audio
+// separados); entregamos el video como archivo y el audio como pista aparte que Kino fusiona.
 
 const API = "https://api.bilibili.com";
 const WEB = "https://www.bilibili.com";
 
+const INTL_API = "https://api.bilibili.tv/intl/gateway/web";
+const INTL_WEB = "https://www.bilibili.tv";
+
 const UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36";
+
+const INTL_UA =
+  "Mozilla/5.0 (Linux; Android 13; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Mobile Safari/537.36";
 
 function log(...args) {
   try {
@@ -13,11 +22,32 @@ function log(...args) {
   } catch {}
 }
 
+function mode() {
+  const m = String(kino.config.get("region") || "").trim().toLowerCase();
+  return m === "china" ? "china" : "intl";
+}
+
 function sessdata() {
   let s = String(kino.config.get("sessdata") || "").trim();
   if (s.toLowerCase().startsWith("sessdata=")) s = s.slice(9).trim();
   return s;
 }
+
+function cleanTitle(t) {
+  return String(t || "").replace(/<[^>]+>/g, "").trim();
+}
+
+function posterUrl(pic) {
+  if (!pic) return undefined;
+  if (pic.startsWith("//")) return "https:" + pic;
+  if (pic.startsWith("http")) return pic;
+  if (pic.startsWith("pic.bstarstatic.com/")) return "https://" + pic;
+  return undefined;
+}
+
+// ---------------------------------------------------------------------------
+// Modo China (bilibili.com) — igual a v0.6.x
+// ---------------------------------------------------------------------------
 
 let buvidCache = null;
 
@@ -89,17 +119,6 @@ function baseHeaders(extra) {
   return h;
 }
 
-function cleanTitle(t) {
-  return String(t || "").replace(/<[^>]+>/g, "").trim();
-}
-
-function posterUrl(pic) {
-  if (!pic) return undefined;
-  if (pic.startsWith("//")) return "https:" + pic;
-  if (pic.startsWith("http")) return pic;
-  return undefined;
-}
-
 function toVideoItem(v) {
   return {
     id: String(v.bvid || v.aid),
@@ -162,10 +181,7 @@ async function getJson(url) {
   return data;
 }
 
-export async function search(query) {
-  const q = (query.q || "").trim();
-  if (!q) return [];
-
+async function cnSearch(q) {
   const url =
     API +
     "/x/web-interface/search/all/v2?keyword=" +
@@ -190,13 +206,13 @@ export async function search(query) {
   return out;
 }
 
-export async function home() {
+async function cnHome() {
   const data = await getJson(API + "/x/web-interface/ranking/v2?rid=0&type=all");
   const list = (data.data && data.data.list) || [];
   return [
     {
       id: "popular",
-      title: "Populares en Bilibili",
+      title: "Populares en Bilibili (China)",
       items: list.slice(0, 20).map(toVideoItem),
     },
   ];
@@ -215,7 +231,7 @@ function streamFromPlay(d, realBvid) {
   return null;
 }
 
-export async function resolve(ref) {
+async function cnResolve(ref) {
   await ensureBuvid();
 
   const s = String(ref);
@@ -280,4 +296,463 @@ export async function resolve(ref) {
     userMessage:
       "No se pudo reproducir. Fuera de Asia suele hacer falta VPN (HK/JP) o verlo en la app de Bilibili.",
   });
+}
+
+// ---------------------------------------------------------------------------
+// Modo internacional (bilibili.tv / app global, relanzada en agosto de 2026)
+// ---------------------------------------------------------------------------
+
+let intlBuvidCache = null;
+
+function intlBuvid() {
+  if (intlBuvidCache) return intlBuvidCache;
+  let saved = null;
+  try {
+    saved = kino.storage.get("intlBuvid");
+  } catch {}
+  if (saved && saved.b3) {
+    intlBuvidCache = saved;
+    return intlBuvidCache;
+  }
+  const hex = "0123456789abcdef";
+  const p = [];
+  for (let i = 0; i < 32; i++) p.push(hex[(Math.random() * 16) | 0]);
+  const uuid =
+    p.slice(0, 8).join("") +
+    "-" +
+    p.slice(8, 12).join("") +
+    "-" +
+    p.slice(12, 16).join("") +
+    "-" +
+    p.slice(16, 20).join("") +
+    "-" +
+    p.slice(20, 32).join("");
+  intlBuvidCache = { b3: uuid + "infoc", b4: uuid };
+  try {
+    kino.storage.set("intlBuvid", intlBuvidCache);
+  } catch {}
+  return intlBuvidCache;
+}
+
+function intlHeaders(extra) {
+  const b = intlBuvid();
+  const h = {
+    "User-Agent": INTL_UA,
+    Referer: INTL_WEB + "/",
+    Origin: INTL_WEB,
+    "Accept-Language": "en-US,en;q=0.9",
+    Cookie: "buvid3=" + b.b3 + "; buvid4=" + b.b4 + "; bstar-web-lang=en",
+  };
+  if (extra) for (const k in extra) h[k] = extra[k];
+  return h;
+}
+
+async function intlJson(url) {
+  const r = await kino.fetch(url, {
+    headers: intlHeaders(),
+    timeoutMs: 20000,
+  });
+  if (!r.ok) {
+    throw kino.error("unavailable", "HTTP " + r.status, {
+      userMessage: "La app internacional de Bilibili respondió con HTTP " + r.status,
+    });
+  }
+  let data;
+  try {
+    data = JSON.parse(r.text());
+  } catch {
+    throw kino.error("unavailable", "bad json", {
+      userMessage: "Respuesta inválida de Bilibili internacional",
+    });
+  }
+  if (data.code !== 0) {
+    const c = data.code;
+    if (c === 10004001) {
+      throw kino.error("geo_blocked", "10004001", {
+        userMessage:
+          "Este título no tiene licencia para tu región en la versión internacional.",
+      });
+    }
+    if (c === 10004004 || c === 10004005 || c === 10023006) {
+      throw kino.error("auth_required", String(c), {
+        userMessage: "Este contenido necesita cuenta o suscripción en la app internacional.",
+      });
+    }
+    throw kino.error("unavailable", String(c), {
+      userMessage: "Bilibili internacional: " + String(data.message || c),
+    });
+  }
+  return data.data;
+}
+
+function decodeJsonText(s) {
+  try {
+    return JSON.parse('"' + s + '"');
+  } catch {
+    return s;
+  }
+}
+
+async function intlSearch(q, cursor) {
+  const pn = cursor ? Math.max(1, parseInt(cursor, 10) || 1) : 1;
+  const data = await intlJson(
+    INTL_API +
+      "/v2/search_v2?keyword=" +
+      encodeURIComponent(q) +
+      "&platform=tv&s_locale=en_US&pn=" +
+      pn +
+      "&ps=20"
+  );
+  const modules = (data && data.modules) || [];
+  const out = [];
+  const seen = new Set();
+
+  for (const mod of modules) {
+    const type = mod.type;
+    if (!Array.isArray(mod.items)) continue;
+    for (const it of mod.items) {
+      if (type === "ogv" && it && it.season_id) {
+        const id = "bts" + it.season_id;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const badges = [];
+        const st = cleanTitle(it.season_type).slice(0, 20);
+        if (st) badges.push(st);
+        const full = cleanTitle(it.index_show).slice(0, 20);
+        if (full) badges.push(full);
+        out.push({
+          id,
+          ref: "s:" + it.season_id,
+          title: cleanTitle(it.title),
+          kind: "series",
+          poster: posterUrl(it.cover),
+          overview: cleanTitle(it.description || "").slice(0, 300),
+          genres: (Array.isArray(it.styles) ? it.styles : [])
+            .slice(0, 5)
+            .map((g) => cleanTitle(g && g.title).slice(0, 30))
+            .filter(Boolean),
+          badges: badges.slice(0, 3),
+        });
+      } else if (type === "ugc" && it && it.aid) {
+        const id = "btv" + it.aid;
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const badges = [];
+        const dur = cleanTitle(it.duration).slice(0, 20);
+        if (dur) badges.push(dur);
+        out.push({
+          id,
+          ref: "v:" + it.aid,
+          title: cleanTitle(it.title),
+          kind: "movie",
+          poster: posterUrl(it.cover),
+          badges: badges.slice(0, 3),
+        });
+      }
+    }
+  }
+
+  if (out.length && pn < 5) return { items: out, next: String(pn + 1) };
+  return out;
+}
+
+function parseAnimeHtml(html) {
+  const out = [];
+  const seen = new Set();
+
+  const decoded = String(html)
+    .replace(/\\"/g, '"')
+    .replace(/&quot;/g, '"')
+    .replace(/&#34;/g, '"');
+
+  // Patrón 1: JSON incrustado (estado inicial del render del servidor)
+  const re = /"season_id"\s*:\s*"?(\d{1,12})"?/g;
+  let m;
+  while ((m = re.exec(decoded)) !== null) {
+    const id = m[1];
+    if (seen.has(id)) continue;
+    const from = Math.max(0, m.index - 300);
+    const win = decoded.slice(from, m.index + 300);
+    // título más CERCANO al id (antes o después)
+    let best = null;
+    let bestDist = 1e9;
+    const reT = /"title"\s*:\s*"((?:[^"\\]|\\.){1,200})"/g;
+    let tm;
+    while ((tm = reT.exec(win)) !== null) {
+      const dist = Math.abs(from + tm.index - m.index);
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = tm[1];
+      }
+    }
+    if (!best) continue;
+    const title = cleanTitle(decodeJsonText(best));
+    if (!title) continue;
+    const cm = win.match(/((?:https?:)?\/\/)?(pic\.bstarstatic\.com\/[^"\\ ]{10,400})/);
+    const poster = cm ? posterUrl(cm[1] ? cm[1] + cm[2] : "https://" + cm[2]) : undefined;
+    seen.add(id);
+    out.push({
+      id: "bts" + id,
+      ref: "s:" + id,
+      title,
+      kind: "series",
+      poster,
+    });
+    if (out.length >= 60) break;
+  }
+
+  if (out.length >= 4) return out;
+
+  // Patrón 2: enlaces <a href="/en/play/ID"> con alt o texto cercano
+  out.length = 0;
+  seen.clear();
+  const reA = /<a[^>]+href="\/(?:[a-z]{2}\/)?play\/(\d{1,12})"[^>]*>/g;
+  while ((m = reA.exec(html)) !== null) {
+    const id = m[1];
+    if (seen.has(id)) continue;
+    const win = html.slice(m.index, Math.min(html.length, m.index + 700));
+    const am = win.match(/alt="([^"]{1,200})"/) || win.match(/title="([^"]{1,200})"/);
+    if (!am) continue;
+    const title = cleanTitle(am[1]);
+    if (!title) continue;
+    const cm = win.match(/((?:https?:)?\/\/)?(pic\.bstarstatic\.com\/[^"\\ ]{10,400})/);
+    const poster = cm ? posterUrl(cm[1] ? cm[1] + cm[2] : "https://" + cm[2]) : undefined;
+    seen.add(id);
+    out.push({ id: "bts" + id, ref: "s:" + id, title, kind: "series", poster });
+    if (out.length >= 60) break;
+  }
+  return out;
+}
+
+async function fetchAnimePageItems() {
+  try {
+    const r = await kino.fetch(INTL_WEB + "/en/anime", {
+      headers: intlHeaders({ Referer: INTL_WEB + "/en/" }),
+      timeoutMs: 25000,
+    });
+    if (!r.ok) return [];
+    return parseAnimeHtml(r.text());
+  } catch (e) {
+    log("anime page", e && e.message);
+    return [];
+  }
+}
+
+async function intlHome() {
+  const items = await fetchAnimePageItems();
+  const rows = [];
+  if (items.length) {
+    rows.push({
+      id: "bts-anime",
+      title: "Anime en Bilibili internacional",
+      items: items.slice(0, 40),
+      ref: "browse:anime",
+      genre: "anime",
+    });
+  }
+  return rows;
+}
+
+function qLabel(q) {
+  const map = {
+    120: "4K",
+    116: "1080P HDR",
+    112: "1080P+",
+    80: "1080p",
+    74: "720P60",
+    64: "720p",
+    32: "480p",
+    16: "360p",
+    15: "240p",
+    6: "240p",
+  };
+  return map[q] || String(q || "") + "p";
+}
+
+async function intlSubtitles(epId) {
+  const data = await intlJson(
+    INTL_API +
+      "/v2/subtitle?platform=web&s_locale=en_US&episode_id=" +
+      encodeURIComponent(epId)
+  );
+  const list =
+    data && (data.subtitles || data.video_subtitle || data.subtitle) || [];
+  if (!Array.isArray(list)) return [];
+  const out = [];
+  for (const sub of list) {
+    if (!sub || typeof sub !== "object") continue;
+    const url = sub.url || (sub.srt && sub.srt.url) || (sub.ass && sub.ass.url);
+    if (!url || !/^https:\/\//.test(url)) continue;
+    if (!/\.srt(\?|$)/i.test(url)) continue;
+    out.push({
+      lang: cleanTitle(sub.lang_key || "en").slice(0, 20) || "en",
+      url,
+      format: "srt",
+    });
+    if (out.length >= 30) break;
+  }
+  return out;
+}
+
+async function intlResolve(kind, id) {
+  const param = kind === "e" ? "ep_id" : "aid";
+  const data = await intlJson(
+    INTL_API +
+      "/playurl?s_locale=en_US&platform=web&" +
+      param +
+      "=" +
+      encodeURIComponent(id)
+  );
+  const p = data && data.playurl;
+  if (!p) {
+    throw kino.error("not_found", "no playurl", {
+      userMessage: "No se encontró el video en la versión internacional.",
+    });
+  }
+
+  const vids = (Array.isArray(p.video) ? p.video : [])
+    .map((x) => (x && x.video_resource) || x || {})
+    .filter((v) => v && v.url && /^https:\/\//.test(v.url))
+    .sort((a, b) => (b.quality || 0) - (a.quality || 0));
+
+  if (!vids.length) {
+    throw kino.error("unavailable", "no free urls", {
+      userMessage:
+        "No hay enlaces libres para este contenido (puede ser exclusivo para suscriptores).",
+    });
+  }
+
+  const auds = (Array.isArray(p.audio_resource) ? p.audio_resource : [])
+    .filter((a) => a && a.url && /^https:\/\//.test(a.url))
+    .sort((a, b) => (b.bandwidth || 0) - (a.bandwidth || 0));
+
+  const headers = { "User-Agent": INTL_UA, Referer: INTL_WEB + "/" };
+
+  const stream = {
+    url: vids[0].url,
+    mime: "video/mp4",
+    headers,
+    label: qLabel(vids[0].quality),
+  };
+  if (p.duration) stream.durationMs = p.duration;
+  if (auds.length) {
+    stream.audioTracks = [
+      { lang: "zh", url: auds[0].url, label: "Original" },
+    ];
+  }
+  if (vids.length > 1) {
+    stream.alternatives = vids.slice(1, 8).map((v) => ({
+      url: v.url,
+      mime: "video/mp4",
+      headers,
+      label: qLabel(v.quality),
+    }));
+  }
+
+  if (kind === "e") {
+    try {
+      const subs = await intlSubtitles(id);
+      if (subs.length) stream.subtitles = subs;
+    } catch (e) {
+      log("subs fail", e && e.message);
+    }
+  }
+  return stream;
+}
+
+// ---------------------------------------------------------------------------
+// Exportaciones del contrato
+// ---------------------------------------------------------------------------
+
+export async function search(query) {
+  const q = (query.q || "").trim();
+  if (!q) return [];
+  if (mode() === "china") return cnSearch(q);
+  return intlSearch(q, query.cursor);
+}
+
+export async function home() {
+  if (mode() === "china") return cnHome();
+  return intlHome();
+}
+
+export async function browse(ref, cursor) {
+  if (cursor) return { items: [], next: null };
+  if (String(ref) === "browse:anime") {
+    const items = await fetchAnimePageItems();
+    return { items: items.slice(0, 100), next: null };
+  }
+  return { items: [], next: null };
+}
+
+export async function episodes(ref) {
+  const s = String(ref || "");
+  if (!s.startsWith("s:")) return { episodes: [] };
+  const seasonId = s.slice(2);
+
+  const info = await intlJson(
+    INTL_API +
+      "/v2/ogv/play/season_info?season_id=" +
+      encodeURIComponent(seasonId) +
+      "&platform=web"
+  );
+  const season = (info && info.season) || {};
+
+  const epsData = await intlJson(
+    INTL_API +
+      "/v2/ogv/play/episodes?season_id=" +
+      encodeURIComponent(seasonId) +
+      "&platform=web"
+  );
+  const sections = (epsData && epsData.sections) || [];
+
+  const episodes = [];
+  let autoNum = 0;
+  (Array.isArray(sections) ? sections : []).forEach((sec, si) => {
+    const list = Array.isArray(sec && sec.episodes) ? sec.episodes : [];
+    for (const ep of list) {
+      if (!ep || !ep.episode_id) continue;
+      autoNum++;
+      const em = String(ep.title_display || ep.short_title_display || "").match(/E(\d{1,4})/);
+      let num = em ? parseInt(em[1], 10) : autoNum;
+      if (!(num >= 1)) num = autoNum;
+      let title = cleanTitle(ep.long_title_display || ep.title_display) || "Capítulo " + num;
+      const limitText = cleanTitle(ep.limit_text).slice(0, 12);
+      if (ep.limit && limitText) title += " · " + limitText;
+      episodes.push({
+        season: si + 1,
+        number: num,
+        ref: "e:" + ep.episode_id,
+        title,
+        still: posterUrl(ep.cover),
+      });
+    }
+  });
+
+  if (!episodes.length) {
+    throw kino.error("not_found", "sin episodios", {
+      userMessage: "No se encontraron episodios para esta serie.",
+    });
+  }
+
+  return {
+    series: {
+      title: cleanTitle(season.title),
+      poster: posterUrl(season.cover),
+      backdrop: posterUrl(season.horizontal_cover),
+      overview: cleanTitle(season.description || "").slice(0, 2000),
+      genres: (Array.isArray(season.styles) ? season.styles : [])
+        .slice(0, 5)
+        .map((g) => cleanTitle(g && g.title).slice(0, 30))
+        .filter(Boolean),
+    },
+    episodes,
+  };
+}
+
+export async function resolve(ref) {
+  const s = String(ref || "");
+  if (s.startsWith("e:")) return intlResolve("e", s.slice(2));
+  if (s.startsWith("v:")) return intlResolve("v", s.slice(2));
+  return cnResolve(s);
 }
