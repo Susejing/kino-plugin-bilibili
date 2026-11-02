@@ -1,10 +1,10 @@
-// Kino plugin: Bilibili v0.7.1
+// Kino plugin: Bilibili v0.7.2
 // Dos modos: internacional (bilibili.tv, sin VPN, por defecto) y China (bilibili.com, puede requerir VPN).
 // Modo internacional: búsqueda, series con episodios, subtítulos y streams del gateway público
 // de la app internacional (api.bilibili.tv), que entrega el video en formato DASH (video y audio
 // separados); entregamos el video como archivo y el audio como pista aparte que Kino fusiona.
-// v0.7.1: el inicio ya no se queda mudo. Si falla la página del catálogo, se respalda con la API
-// de búsqueda; los enlaces de tarjetas aceptan /play/<serie>/<episodio>; y todo queda en el log.
+// v0.7.2: catálogo organizado en secciones — la página real del catálogo leída con el navegador
+// oculto de Kino (browser pages) y una fila de series destacadas por API; la búsqueda sigue igual.
 
 const API = "https://api.bilibili.com";
 const WEB = "https://www.bilibili.com";
@@ -526,6 +526,66 @@ function parseAnimeHtml(html) {
   return out;
 }
 
+// Extrae tarjetas del HTML YA RENDERIZADO por el navegador oculto de Kino.
+// Usa el selector oficial kino.html.select cuando existe; si no, patrón de regex.
+function itemsFromRenderedHtml(html) {
+  const out = [];
+  const seen = new Set();
+
+  let matches = null;
+  try {
+    matches = kino.html.select(html, "a[href*='/play/']");
+  } catch {
+    matches = null;
+  }
+
+  if (matches && matches.length) {
+    for (const el of matches) {
+      const href = (el.attrs && el.attrs.href) || "";
+      const pm = href.match(/\/(?:[a-z]{2}\/)?play\/(\d{1,12})(?:\/\d{1,12})?/);
+      if (!pm) continue;
+      const id = pm[1];
+      if (seen.has(id)) continue;
+      let title = cleanTitle((el.attrs && el.attrs.title) || "");
+      if (!title) {
+        const alt = (el.html || "").match(/alt="([^"]{1,200})"/);
+        title = cleanTitle(alt ? alt[1] : el.text);
+      }
+      if (!title || title.length < 2) continue;
+      const cm = (el.html || "").match(/((?:https?:)?\/\/)?(pic\.bstarstatic\.com\/[^"\\ )]{10,400})/);
+      const poster = cm ? posterUrl(cm[1] ? cm[1] + cm[2] : "https://" + cm[2]) : undefined;
+      seen.add(id);
+      out.push({ id: "bts" + id, ref: "s:" + id, title, kind: "series", poster });
+      if (out.length >= 60) break;
+    }
+    if (out.length >= 4) return out;
+  }
+
+  // sin selector o pocos resultados: parser de regex sobre el mismo HTML
+  const alt = parseAnimeHtml(html);
+  return alt.length > out.length ? alt : out;
+}
+
+// Página del catálogo con el navegador oculto (ejecuta el JS del sitio).
+async function fetchAnimePageViaBrowser() {
+  try {
+    const page = await kino.browser.page(INTL_WEB + "/en/anime", {
+      waitFor: "/play/",
+      timeoutMs: 12000,
+    });
+    if (!page || !page.html) {
+      log("browser page sin html");
+      return [];
+    }
+    const items = itemsFromRenderedHtml(page.html);
+    log("browser page " + page.html.length + " chars, " + items.length + " series");
+    return items;
+  } catch (e) {
+    log("browser page falló: " + String(e && e.message ? e.message : e).slice(0, 100));
+    return [];
+  }
+}
+
 async function fetchAnimePageItems() {
   try {
     const r = await kino.fetch(INTL_WEB + "/en/anime", {
@@ -546,6 +606,15 @@ async function fetchAnimePageItems() {
   }
 }
 
+// Cadena del catálogo: navegador oculto → descarga directa → vacío.
+async function fetchCatalogItems() {
+  const viaBrowser = await fetchAnimePageViaBrowser();
+  if (viaBrowser.length >= 4) return viaBrowser;
+  const viaFetch = await fetchAnimePageItems();
+  if (viaFetch.length > viaBrowser.length) return viaFetch;
+  return viaBrowser;
+}
+
 const HOME_FALLBACK_KEYWORDS = [
   "LINK CLICK",
   "Healer Girl",
@@ -554,6 +623,17 @@ const HOME_FALLBACK_KEYWORDS = [
   "Estab-Life",
   "Girls Band Cry",
   "BanG Dream",
+  "Battle Through the Heavens",
+  "Soul Land",
+  "Throne of Seal",
+  "The King's Avatar",
+  "Heaven Official Blessing",
+  "To Your Eternity",
+  "The Faraway Paladin",
+  "Shangri-La Frontier",
+  "Summer Time Rendering",
+  "Scissor Seven",
+  "White Cat Legend",
 ];
 
 async function intlHomeFallback() {
@@ -579,31 +659,32 @@ async function intlHomeFallback() {
 }
 
 async function intlHome() {
-  const items = await fetchAnimePageItems();
-  if (items.length) {
-    log("home: " + items.length + " de la página del catálogo");
-    return [
-      {
-        id: "bts-anime",
-        title: "Anime en Bilibili internacional",
-        items: items.slice(0, 40),
-        ref: "browse:anime",
-        genre: "anime",
-      },
-    ];
+  const rows = [];
+
+  const pageItems = await fetchCatalogItems();
+  if (pageItems.length >= 4) {
+    log("home catálogo: " + pageItems.length + " series de la página");
+    rows.push({
+      id: "bts-anime",
+      title: "Anime en Bilibili internacional",
+      items: pageItems.slice(0, 40),
+      ref: "browse:anime",
+      genre: "anime",
+    });
   }
-  log("home sin página, probando respaldo de búsqueda");
-  const fallback = await intlHomeFallback();
-  if (fallback.length) {
-    log("home respaldo: " + fallback.length + " series");
-    return [
-      {
-        id: "bts-anime",
-        title: "Series para empezar en Bilibili internacional",
-        items: fallback.slice(0, 20),
-      },
-    ];
+
+  const destacadas = await intlHomeFallback();
+  if (destacadas.length) {
+    log("home destacadas: " + destacadas.length + " series");
+    rows.push({
+      id: "bts-destacadas",
+      title: "Series destacadas",
+      items: destacadas.slice(0, 20),
+    });
   }
+
+  if (rows.length) return rows;
+
   throw kino.error("unavailable", "home vacío", {
     userMessage:
       "No se pudo cargar el catálogo. La búsqueda sí funciona: busca un título (por ejemplo LINK CLICK).",
@@ -736,7 +817,7 @@ export async function home() {
 export async function browse(ref, cursor) {
   if (cursor) return { items: [], next: null };
   if (String(ref) === "browse:anime") {
-    let items = await fetchAnimePageItems();
+    let items = await fetchCatalogItems();
     if (!items.length) items = await intlHomeFallback();
     log("browse: " + items.length + " series");
     return { items: items.slice(0, 100), next: null };
