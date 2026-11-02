@@ -1,8 +1,10 @@
-// Kino plugin: Bilibili v0.7.0
+// Kino plugin: Bilibili v0.7.1
 // Dos modos: internacional (bilibili.tv, sin VPN, por defecto) y China (bilibili.com, puede requerir VPN).
 // Modo internacional: búsqueda, series con episodios, subtítulos y streams del gateway público
 // de la app internacional (api.bilibili.tv), que entrega el video en formato DASH (video y audio
 // separados); entregamos el video como archivo y el audio como pista aparte que Kino fusiona.
+// v0.7.1: el inicio ya no se queda mudo. Si falla la página del catálogo, se respalda con la API
+// de búsqueda; los enlaces de tarjetas aceptan /play/<serie>/<episodio>; y todo queda en el log.
 
 const API = "https://api.bilibili.com";
 const WEB = "https://www.bilibili.com";
@@ -503,10 +505,10 @@ function parseAnimeHtml(html) {
 
   if (out.length >= 4) return out;
 
-  // Patrón 2: enlaces <a href="/en/play/ID"> con alt o texto cercano
+  // Patrón 2: enlaces <a href="/play/ID"> o "/play/ID/EP" con alt o texto cercano
   out.length = 0;
   seen.clear();
-  const reA = /<a[^>]+href="\/(?:[a-z]{2}\/)?play\/(\d{1,12})"[^>]*>/g;
+  const reA = /<a[^>]+href="\/(?:[a-z]{2}\/)?play\/(\d{1,12})(?:\/\d{1,12})?[?"][^>]*>/g;
   while ((m = reA.exec(html)) !== null) {
     const id = m[1];
     if (seen.has(id)) continue;
@@ -527,30 +529,85 @@ function parseAnimeHtml(html) {
 async function fetchAnimePageItems() {
   try {
     const r = await kino.fetch(INTL_WEB + "/en/anime", {
-      headers: intlHeaders({ Referer: INTL_WEB + "/en/" }),
+      headers: intlHeaders({ Referer: INTL_WEB + "/en/", "User-Agent": UA }),
       timeoutMs: 25000,
     });
-    if (!r.ok) return [];
-    return parseAnimeHtml(r.text());
+    if (!r.ok) {
+      log("anime page HTTP " + r.status);
+      return [];
+    }
+    const text = r.text();
+    const items = parseAnimeHtml(text);
+    log("anime page " + text.length + " chars, " + items.length + " series");
+    return items;
   } catch (e) {
-    log("anime page", e && e.message);
+    log("anime page falló: " + String(e && e.message ? e.message : e).slice(0, 140));
     return [];
   }
 }
 
+const HOME_FALLBACK_KEYWORDS = [
+  "LINK CLICK",
+  "Healer Girl",
+  "Love All Play",
+  "RPG Real Estate",
+  "Estab-Life",
+  "Girls Band Cry",
+  "BanG Dream",
+];
+
+async function intlHomeFallback() {
+  const out = [];
+  const seen = new Set();
+  const responses = await Promise.all(
+    HOME_FALLBACK_KEYWORDS.map((kw) =>
+      intlSearch(kw, null).catch(() => null)
+    )
+  );
+  for (const res of responses) {
+    if (!res) continue;
+    const items = Array.isArray(res) ? res : res.items || [];
+    for (const it of items) {
+      if (it && it.kind === "series" && it.ref && !seen.has(it.ref)) {
+        seen.add(it.ref);
+        out.push(it);
+        break;
+      }
+    }
+  }
+  return out;
+}
+
 async function intlHome() {
   const items = await fetchAnimePageItems();
-  const rows = [];
   if (items.length) {
-    rows.push({
-      id: "bts-anime",
-      title: "Anime en Bilibili internacional",
-      items: items.slice(0, 40),
-      ref: "browse:anime",
-      genre: "anime",
-    });
+    log("home: " + items.length + " de la página del catálogo");
+    return [
+      {
+        id: "bts-anime",
+        title: "Anime en Bilibili internacional",
+        items: items.slice(0, 40),
+        ref: "browse:anime",
+        genre: "anime",
+      },
+    ];
   }
-  return rows;
+  log("home sin página, probando respaldo de búsqueda");
+  const fallback = await intlHomeFallback();
+  if (fallback.length) {
+    log("home respaldo: " + fallback.length + " series");
+    return [
+      {
+        id: "bts-anime",
+        title: "Series para empezar en Bilibili internacional",
+        items: fallback.slice(0, 20),
+      },
+    ];
+  }
+  throw kino.error("unavailable", "home vacío", {
+    userMessage:
+      "No se pudo cargar el catálogo. La búsqueda sí funciona: busca un título (por ejemplo LINK CLICK).",
+  });
 }
 
 function qLabel(q) {
@@ -679,7 +736,9 @@ export async function home() {
 export async function browse(ref, cursor) {
   if (cursor) return { items: [], next: null };
   if (String(ref) === "browse:anime") {
-    const items = await fetchAnimePageItems();
+    let items = await fetchAnimePageItems();
+    if (!items.length) items = await intlHomeFallback();
+    log("browse: " + items.length + " series");
     return { items: items.slice(0, 100), next: null };
   }
   return { items: [], next: null };
