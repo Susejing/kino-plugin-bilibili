@@ -1,4 +1,4 @@
-// Kino plugin: Bilibili v0.7.4
+// Kino plugin: Bilibili v0.7.5
 // Dos modos: internacional (bilibili.tv, sin VPN, por defecto) y China (bilibili.com, puede requerir VPN).
 // Modo internacional: búsqueda, series con episodios, subtítulos y streams del gateway público
 // de la app internacional (api.bilibili.tv), que entrega el video en formato DASH (video y audio
@@ -9,6 +9,9 @@
 // v0.7.4: a prueba de fallos — el navegador reintenta una vez si falla rápido; si la página de
 // anime no responde, el inicio muestra Tendencias en su lugar y la reintenta tras 5 minutos;
 // y el Registro dice la versión exacta y el motivo de cada fallo del navegador.
+// v0.7.5: catálogo ampliado (29 nombres: series vistas en las páginas del sitio + las clásicas)
+// y secciones POR GÉNERO en el inicio (Acción, Fantasía, Romance…), cada una con su propia
+// sección completa al tocarla; lo enriquecido se guarda para que las secciones crezcan solas.
 
 const API = "https://api.bilibili.com";
 const WEB = "https://www.bilibili.com";
@@ -70,9 +73,9 @@ function readCache(key) {
   }
 }
 
-function writeCache(key, items) {
+function writeCache(key, items, cap) {
   try {
-    const slim = (items || []).slice(0, 60).map((it) => ({
+    const slim = (items || []).slice(0, cap || 60).map((it) => ({
       id: it.id,
       ref: it.ref,
       title: it.title,
@@ -734,6 +737,19 @@ const HOME_KEYWORDS = [
   "Summer Time Rendering",
   "Scissor Seven",
   "White Cat Legend",
+  // series vistas en las páginas del propio sitio (anime y portada): la búsqueda
+  // del teléfono las encuentra seguro y cada una trae series relacionadas
+  "Qi Refining for 3000 Years",
+  "Carp Reborn",
+  "A World Worth Protecting",
+  "Rakshasa Street",
+  "Spirits In Chinese Brushes",
+  "The Invincible",
+  "God Troubles Me",
+  "Cinderella Chef",
+  "The Eternal Strife",
+  "The Story of Fengzhi Senla",
+  "Master of the Star Spring",
 ];
 
 // Todas las series ogv de las keywords (hasta 4 por keyword, sin repetir).
@@ -762,11 +778,11 @@ async function destacadasAll() {
 }
 
 async function destacadasCached(allowNet) {
-  const cached = readCache("cache:destacadas");
+  const cached = readCache("cache:destacadas2");
   if (cached && cached.length) return cached;
   if (!allowNet) return [];
   const items = await destacadasAll();
-  if (items.length) writeCache("cache:destacadas", items);
+  if (items.length) writeCache("cache:destacadas2", items, 120);
   return items;
 }
 
@@ -817,6 +833,61 @@ function mergeItems() {
   return Array.from(byRef.values());
 }
 
+// ---------------------------------------------------------------------------
+// Secciones por género
+// ---------------------------------------------------------------------------
+
+const GENRE_ES = {
+  Action: "Acción",
+  Adventure: "Aventura",
+  Comedy: "Comedia",
+  Romance: "Romance",
+  Fantasy: "Fantasía",
+  Mystery: "Misterio",
+  Suspense: "Suspense",
+  Drama: "Drama",
+  "Sci-Fi": "Ciencia ficción",
+  "Slice of Life": "Vida cotidiana",
+  Sports: "Deportes",
+  School: "Escolar",
+  Historical: "Histórico",
+  "Martial Arts": "Artes marciales",
+  Horror: "Terror",
+  Isekai: "Isekai",
+  Harem: "Harem",
+  "Chinese Style": "Estilo chino",
+  "Hot-blooded": "De sangre caliente",
+  "Boys Love": "Boys love",
+  "Girls Love": "Girls love",
+};
+
+// géneros genéricos que no forman sección propia
+const GENRE_SKIP = { Anime: 1, Movies: 1, TV: 1, Film: 1, "TV Shows": 1 };
+
+function genreLabelES(g) {
+  return GENRE_ES[g] || g;
+}
+
+// Agrupa el catálogo por género y devuelve las secciones con 4 series o más.
+function genreSections(pool) {
+  const byGenre = new Map();
+  for (const it of pool || []) {
+    for (const g of (it && it.genres) || []) {
+      const key = String(g || "").slice(0, 30);
+      if (!key || GENRE_SKIP[key]) continue;
+      if (!byGenre.has(key)) byGenre.set(key, []);
+      byGenre.get(key).push(it);
+    }
+  }
+  const sections = [];
+  for (const g of byGenre.keys()) {
+    const items = byGenre.get(g);
+    if (items.length >= 4) sections.push({ genre: g, items });
+  }
+  sections.sort((a, b) => b.items.length - a.items.length);
+  return sections;
+}
+
 async function intlHome() {
   const rows = [];
   const t0 = Date.now();
@@ -846,6 +917,19 @@ async function intlHome() {
   }
 
   const destacadas = await destacadasCached(true);
+
+  // Secciones por género del catálogo entero (los géneros llegan con la búsqueda
+  // y se van acumulando al visitar las secciones)
+  const pool = mergeItems(anime.items, popular.items, destacadas);
+  for (const g of genreSections(pool).slice(0, 4)) {
+    rows.push({
+      id: "bts-genre-" + g.genre.replace(/[^a-z0-9]+/gi, "-").slice(0, 20),
+      title: genreLabelES(g.genre),
+      items: g.items.slice(0, 20),
+      ref: "browse:g:" + encodeURIComponent(g.genre),
+    });
+  }
+
   if (destacadas.length) {
     rows.push({
       id: "bts-destacadas",
@@ -855,7 +939,7 @@ async function intlHome() {
     });
   }
 
-  log("home v0.7.4: " + (rows.length ? rows.map((r) => r.title + " " + r.items.length).join(" | ") : "sin filas"));
+  log("home v0.7.5: " + (rows.length ? rows.map((r) => r.title + " " + r.items.length).join(" | ") : "sin filas"));
 
   if (rows.length) return rows;
 
@@ -997,7 +1081,9 @@ export async function browse(ref, cursor) {
     items = anime.items;
     if (!items.length) items = await destacadasCached(true);
     log("browse anime: " + items.length);
-    return { items: (await enrichItems(items, 40)).slice(0, 100), next: null };
+    const enriched = await enrichItems(items, 25);
+    if (anime.items.length) writeCache("cache:anime", anime.items, 60);
+    return { items: enriched.slice(0, 100), next: null };
   }
   if (r === "browse:popular") {
     const popular = await catalogSection(INTL_WEB + "/en/popular", "cache:popular", true);
@@ -1008,7 +1094,25 @@ export async function browse(ref, cursor) {
           "Tendencias no pudo cargar ahora mismo. Vuelve al inicio e inténtalo de nuevo en unos minutos.",
       });
     }
-    return { items: (await enrichItems(popular.items, 40)).slice(0, 100), next: null };
+    const enrichedPop = await enrichItems(popular.items, 25);
+    writeCache("cache:popular", popular.items, 60);
+    return { items: enrichedPop.slice(0, 100), next: null };
+  }
+  if (r.startsWith("browse:g:")) {
+    const genre = decodeURIComponent(r.slice(9));
+    const pool = await destacadasCached(true);
+    const sec = genreSections(pool).find((s) => s.genre === genre);
+    const items = sec ? sec.items : [];
+    log("browse genero " + genre + ": " + items.length);
+    if (!items.length) {
+      throw kino.error("unavailable", "genero vacio", {
+        userMessage:
+          "Esta sección todavía no tiene series. Vuelve al inicio y vuelve a entrar en un rato.",
+      });
+    }
+    const enriched = await enrichItems(items, 25);
+    writeCache("cache:destacadas2", pool, 120);
+    return { items: enriched.slice(0, 100), next: null };
   }
   if (r === "browse:catalog") {
     const anime = await catalogSection(INTL_WEB + "/en/anime", "cache:anime", false);
@@ -1022,7 +1126,9 @@ export async function browse(ref, cursor) {
           "El catálogo completo aún se está cargando. Vuelve al inicio, espera un momento y vuelve a entrar.",
       });
     }
-    return { items: (await enrichItems(all, 40)).slice(0, 100), next: null };
+    const enriched = await enrichItems(all, 25);
+    writeCache("cache:destacadas2", all, 120);
+    return { items: enriched.slice(0, 100), next: null };
   }
   return { items: [], next: null };
 }
