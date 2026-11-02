@@ -1,7 +1,7 @@
 {
   "id": "bilibili",
   "name": "Bilibili",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "apiVersion": 6,
   "entry": "plugin.js",
   "description": "Bilibili internacional (bilibili.tv): anime y videos con licencia global, sin VPN. Modo China opcional (bilibili.com, puede requerir VPN).",
